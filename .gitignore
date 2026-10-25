@@ -1,0 +1,15 @@
+engine.dll
+*.exe
+*.o
+*.obj
+*.dll.a
+.venv/
+venv/
+__pycache__/
+.streamlit/
+*.pyc
+*.pdb
+*.ilk
+*.user
+*.suo
+*.code-workspace
