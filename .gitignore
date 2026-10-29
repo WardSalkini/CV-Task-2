@@ -1,10 +1,25 @@
-engine.dll
+# Native build outputs
+build/
+build-*/
+*.dll
 *.exe
 *.o
 *.obj
 *.dll.a
+*.so
+*.dylib
+*.a
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Local environments and editor files
 .venv/
 venv/
+.vscode/
 __pycache__/
 .streamlit/
 *.pyc
@@ -13,3 +28,9 @@ __pycache__/
 *.user
 *.suo
 *.code-workspace
+
+# Local logs and temporary files
+*.log
+build-log.txt
+syntax-log.txt
+tempCodeRunnerFile.py
