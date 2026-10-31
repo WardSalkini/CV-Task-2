@@ -75,7 +75,6 @@ The engine does **not** currently implement:
 - Hough or other line detection.
 - Circle detection.
 - Ellipse detection.
-- Active Contour Model/snake initialization or greedy evolution.
 - Chain-code generation.
 - Contour perimeter calculation.
 - Contour enclosed-area calculation.
@@ -120,7 +119,6 @@ The front end currently exposes only Canny functionality. It has no UI or
 binding for:
 
 - Selecting or initializing an object contour.
-- Running the greedy snake/Active Contour algorithm.
 - Displaying detected lines, circles, or ellipses.
 - Displaying chain code.
 - Displaying perimeter or area.
@@ -138,8 +136,8 @@ binding for:
 | Detect circles | **Done** | Custom center/radius voting, center projection, distance suppression, and exported result buffers are in `canny_engine.cpp`. |
 | Detect ellipses, if present | **Done** | Pairwise/1D semi-minor-axis voting with edge subsampling and exported ellipse results is in `canny_engine.cpp`. |
 | Superimpose detected shapes on images | **Done** | C++ renders lines, circles/center marks, and rotated ellipses over the edge overlay. |
-| Initialize a contour for a given object | **Not done** | No contour input/selection or initialization API exists. |
-| Evolve an Active Contour Model using greedy algorithm | **Not done** | No snake representation, energy function, neighborhood search, or iteration loop exists. |
+| Initialize a contour for a given object | **Done** | Circle / ellipse / rectangle / polygon initializers in `snake_wrapper.py`; sliders on the Active Contour page. |
+| Evolve an Active Contour Model using greedy algorithm | **Done** | `snake_engine.cpp` (`snake_greedy`): continuity + curvature + image-gradient energy, optional balloon, window search, move-count stopping, corner relaxation. |
 | Represent the contour as chain code | **Not done** | No chain-code encoding or output exists. |
 | Compute contour perimeter | **Not done** | No perimeter calculation exists. |
 | Compute enclosed contour area | **Not done** | No area calculation exists. |
@@ -242,7 +240,8 @@ build/runtime verification pending.**
 
 Requirement 1 source implementation now includes Canny, custom Hough shape
 detection, C++ superimposition, and the expanded Python UI. Requirement 2
-(Active Contours, chain code, perimeter, and area) is still not implemented.
+active contour (greedy snake, `snake_engine.cpp` + `pages/2_Active_Contour.py`) is implemented;
+chain code, perimeter, and area are still not implemented and should consume the exported `contour.csv`.
 
 ## Required Work
 

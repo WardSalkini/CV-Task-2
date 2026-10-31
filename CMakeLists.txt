@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.15)
 project(canny_engine CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -24,4 +24,17 @@ if (MSVC)
     target_compile_options(canny_engine PRIVATE /O2)
 else()
     target_compile_options(canny_engine PRIVATE -O3)
+endif()
+
+# ---- Person 3: greedy active contour (pure C++, no OpenCV needed) ----
+add_library(snake_engine SHARED snake_engine.cpp)
+set_target_properties(snake_engine PROPERTIES
+        OUTPUT_NAME "snake_engine"
+        PREFIX ""
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+if (MSVC)
+    target_compile_options(snake_engine PRIVATE /O2)
+else()
+    target_compile_options(snake_engine PRIVATE -O3)
 endif()
