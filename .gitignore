@@ -34,3 +34,7 @@ __pycache__/
 build-log.txt
 syntax-log.txt
 tempCodeRunnerFile.py
+.idea/
+cmake-build-*/
+*.dll
+tempCodeRunnerFile.py

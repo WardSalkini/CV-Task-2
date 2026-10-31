@@ -38,3 +38,16 @@ if (MSVC)
 else()
     target_compile_options(snake_engine PRIVATE -O3)
 endif()
+
+# ---- Person 4: chain code, perimeter and area of the final contour (pure C++, no OpenCV needed) ----
+add_library(contour_engine SHARED contour_engine.cpp)
+set_target_properties(contour_engine PROPERTIES
+        OUTPUT_NAME "contour_engine"
+        PREFIX ""
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+if (MSVC)
+    target_compile_options(contour_engine PRIVATE /O2)
+else()
+    target_compile_options(contour_engine PRIVATE -O3)
+endif()
