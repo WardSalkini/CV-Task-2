@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(canny_engine CXX)
+project(engine CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,47 +7,20 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(OpenCV REQUIRED)
+# One library for the whole assignment (Canny, Hough, snake, chain code). No OpenCV needed.
+add_library(engine SHARED engine.cpp)
 
-add_library(canny_engine SHARED canny_engine.cpp)
-target_include_directories(canny_engine PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(canny_engine PRIVATE ${OpenCV_LIBS})
-
-# canny_engine.dll lands next to canny_app.py
-set_target_properties(canny_engine PROPERTIES
-        OUTPUT_NAME "canny_engine"
+# engine.dll lands next to app.py
+set_target_properties(engine PROPERTIES
+        OUTPUT_NAME "engine"
         PREFIX ""
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR})
 
 if (MSVC)
-    target_compile_options(canny_engine PRIVATE /O2)
+    target_compile_options(engine PRIVATE $<$<NOT:$<CONFIG:Debug>>:/O2>)
 else()
-    target_compile_options(canny_engine PRIVATE -O3)
-endif()
-
-# ---- Person 3: greedy active contour (pure C++, no OpenCV needed) ----
-add_library(snake_engine SHARED snake_engine.cpp)
-set_target_properties(snake_engine PROPERTIES
-        OUTPUT_NAME "snake_engine"
-        PREFIX ""
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
-if (MSVC)
-    target_compile_options(snake_engine PRIVATE /O2)
-else()
-    target_compile_options(snake_engine PRIVATE -O3)
-endif()
-
-# ---- Person 4: chain code, perimeter and area of the final contour (pure C++, no OpenCV needed) ----
-add_library(contour_engine SHARED contour_engine.cpp)
-set_target_properties(contour_engine PROPERTIES
-        OUTPUT_NAME "contour_engine"
-        PREFIX ""
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
-if (MSVC)
-    target_compile_options(contour_engine PRIVATE /O2)
-else()
-    target_compile_options(contour_engine PRIVATE -O3)
+    target_compile_options(engine PRIVATE -O3)
 endif()

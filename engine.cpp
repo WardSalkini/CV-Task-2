@@ -1,8 +1,22 @@
-#include <opencv2/core.hpp>
-#include <opencv2/imgproc.hpp>
+// =====================================================================
+// engine.cpp - backend of Assignment 2 (edge and boundary detection)
+//
+// Everything is written from scratch: no OpenCV, no third-party code. app.py loads the compiled library
+// (engine.dll / engine.so) through ctypes and calls the functions marked "exported" below.
+//
+// WHERE IS MY PART?   (search for the tag in this file, and for the same tag in app.py)
+//   TASK 1 - PERSON 1 : Canny edge detector            canny_run, edge_similarity
+//   TASK 1 - PERSON 2 : Hough lines, circles, ellipses canny_detect_shapes
+//   TASK 2 - PERSON 3 : Snake (greedy active contour)  snake_greedy, snake_gradient_map
+//   TASK 2 - PERSON 4 : Chain code, perimeter, area    contour_to_chain, chain_differential, chain_decode,
+//                                                      chain_measure, chain_fill, polygon_measure
+//
+// Build:  cmake (see CMakeLists.txt)   or   cl /O2 /EHsc /std:c++17 /LD engine.cpp /Fe:engine.dll
+// =====================================================================
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -16,6 +30,13 @@ using namespace std;
 #else
   #define API __attribute__((visibility("default")))
 #endif
+
+
+// #####################################################################
+// TASK 1 - PERSON 1 - CANNY EDGE DETECTOR
+//   internals: class CannyDetector
+//   exported: canny_run, edge_similarity
+// #####################################################################
 
 // =====================================================================
 // Canny edge detector, implemented from scratch:
@@ -233,6 +254,43 @@ public:
     const vector<float>& gx() const { return gx_; }
     const vector<float>& gy() const { return gy_; }
 };
+
+
+extern "C" {
+    // in: rows x cols x channels (1 = gray, 3 = BGR). low/high are on the 0..255 scale of the
+    // normalized gradient magnitude. out_overlay is rows x cols x 3. out_info has 4 floats.
+    API void canny_run(const unsigned char* in, int rows, int cols, int channels, int color_mode,
+                       int ksize, float sigma, float low, float high, int auto_thr,
+                       unsigned char* out_smooth, unsigned char* out_mag, unsigned char* out_nms,
+                       unsigned char* out_edges, unsigned char* out_overlay, float* out_info) {
+        CannyDetector det(in, rows, cols, channels, color_mode);
+        det.run(ksize, sigma, low, high, auto_thr != 0);
+        det.copySmoothed(out_smooth);
+        det.copyMagnitude(out_mag);
+        det.copyNms(out_nms);
+        det.copyEdges(out_edges);
+        det.copyOverlay(in, channels, out_overlay);
+        det.info(out_info);
+    }
+
+    // Intersection over union of two binary edge maps (1 = identical)
+    API float edge_similarity(const unsigned char* a, const unsigned char* b, int n) {
+        long inter = 0, uni = 0;
+        for (int i = 0; i < n; ++i) {
+            bool x = a[i] != 0, y = b[i] != 0;
+            inter += (x && y);
+            uni += (x || y);
+        }
+        return uni ? (float)inter / (float)uni : 1.0f;
+    }
+
+}  // extern "C"  (Person 1)
+
+// #####################################################################
+// TASK 1 - PERSON 2 - HOUGH TRANSFORM (lines, circles, ellipses)
+//   internals: detectLines, detectCircles, detectEllipses and the drawing helpers
+//   exported: canny_detect_shapes (runs Canny, then the selected detectors)
+// #####################################################################
 
 struct LineResult { float rho, theta, votes, x1, y1, x2, y2; };
 struct CircleResult { float x, y, radius, votes; };
@@ -495,48 +553,8 @@ static void drawEllipse(vector<uint8_t>& out, int w, int h, const EllipseResult&
     }
 }
 
+
 extern "C" {
-    // in: rows x cols x channels (1 = gray, 3 = BGR). low/high are on the 0..255 scale of the
-    // normalized gradient magnitude. out_overlay is rows x cols x 3. out_info has 4 floats.
-    API void canny_run(const unsigned char* in, int rows, int cols, int channels, int color_mode,
-                       int ksize, float sigma, float low, float high, int auto_thr,
-                       unsigned char* out_smooth, unsigned char* out_mag, unsigned char* out_nms,
-                       unsigned char* out_edges, unsigned char* out_overlay, float* out_info) {
-        CannyDetector det(in, rows, cols, channels, color_mode);
-        det.run(ksize, sigma, low, high, auto_thr != 0);
-        det.copySmoothed(out_smooth);
-        det.copyMagnitude(out_mag);
-        det.copyNms(out_nms);
-        det.copyEdges(out_edges);
-        det.copyOverlay(in, channels, out_overlay);
-        det.info(out_info);
-    }
-
-    // Reference: OpenCV's Canny (gray, Gaussian blur first, L2 gradient, 3x3 Sobel).
-    // abs_low / abs_high are raw gradient magnitudes (not the 0..255 scale).
-    API void canny_opencv(const unsigned char* in, int rows, int cols, int channels,
-                          int ksize, float sigma, float abs_low, float abs_high,
-                          unsigned char* out_edges) {
-        cv::Mat src(rows, cols, channels == 1 ? CV_8UC1 : CV_8UC3, const_cast<unsigned char*>(in));
-        cv::Mat gray, blurred, edges;
-        if (channels == 1) gray = src; else cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
-        if (ksize % 2 == 0) ++ksize;
-        cv::GaussianBlur(gray, blurred, cv::Size(ksize, ksize), sigma);
-        cv::Canny(blurred, edges, abs_low, abs_high, 3, true);
-        memcpy(out_edges, edges.data, (size_t)rows * cols);
-    }
-
-    // Intersection over union of two binary edge maps (1 = identical)
-    API float edge_similarity(const unsigned char* a, const unsigned char* b, int n) {
-        long inter = 0, uni = 0;
-        for (int i = 0; i < n; ++i) {
-            bool x = a[i] != 0, y = b[i] != 0;
-            inter += (x && y);
-            uni += (x || y);
-        }
-        return uni ? (float)inter / (float)uni : 1.0f;
-    }
-
     // flags: bit 0 lines, bit 1 circles, bit 2 ellipses.
     // Arrays are caller-owned. line_data has max_lines * 7 floats,
     // circle_data has max_circles * 4 floats, ellipse_data has max_ellipses * 6 floats.
@@ -628,4 +646,450 @@ extern "C" {
             memcpy(overlay_out, rendered.data(), rendered.size());
         }
     }
+}  // extern "C"  (Person 2)
+
+// #####################################################################
+// TASK 2 - PERSON 3 - ACTIVE CONTOUR (SNAKE), GREEDY ALGORITHM
+//   exported: snake_greedy, snake_gradient_map
+// #####################################################################
+
+// =====================================================================
+// Person 3 - Active Contour Model (snake), greedy algorithm (Williams & Shah, 1992)
+//
+// Pure C++17, no OpenCV needed. Exposed through a C API so Python can call it with ctypes.
+//
+// Energy of a contour point v_i that is tried at candidate position p in its neighbourhood:
+//
+//   E(p) = alpha * E_cont(p) + beta * E_curv(p) + gamma * E_img(p) + E_balloon(p)
+//
+//   E_cont : (d_avg - |p - v_{i-1}|)^2        keeps the points evenly spaced (elasticity)
+//   E_curv : |v_{i-1} - 2p + v_{i+1}|^2       keeps the contour smooth (rigidity)
+//   E_img  : -|grad I(p)|                     pulls the contour onto strong edges
+//   E_bal  : -balloon * (p - v_i) . n_out     optional inflate (+) / deflate (-) force,
+//            faded to 0 where the gradient is strong so the contour stops on the object boundary
+//
+// Every term is normalised inside the search window (E_cont and E_curv by their window maximum,
+// E_img by (g - gmin) / (gmax - gmin)), so alpha / beta / gamma are comparable weights.
+// Each iteration visits every point once, moves it to the lowest-energy neighbour, then
+// relaxes beta at sharp corners. The loop stops when fewer than `move_tol` points moved.
+//
+// The contour is CLOSED: point n-1 is connected back to point 0.
+// Output coordinates are (x, y) in pixel units, x = column, y = row.
+// =====================================================================
+
+namespace snake_impl {
+
+struct Pt { float x, y; };
+
+inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// ---------- image energy: Gaussian blur + Sobel magnitude (from scratch) ----------
+vector<float> toGray(const unsigned char* in, int rows, int cols, int channels) {
+    vector<float> g((size_t)rows * cols);
+    if (channels == 1) {
+        for (size_t i = 0; i < g.size(); ++i) g[i] = in[i];
+    } else {  // BGR
+        for (size_t i = 0; i < g.size(); ++i) {
+            const unsigned char* p = in + i * 3;
+            g[i] = 0.114f * p[0] + 0.587f * p[1] + 0.299f * p[2];
+        }
+    }
+    return g;
 }
+
+void gaussianBlur(vector<float>& img, int rows, int cols, float sigma) {
+    if (sigma <= 0.0f) return;
+    int half = max(1, (int)ceilf(3.0f * sigma));
+    vector<float> k(2 * half + 1);
+    float sum = 0;
+    for (int i = -half; i <= half; ++i) { k[i + half] = expf(-(i * i) / (2 * sigma * sigma)); sum += k[i + half]; }
+    for (auto& v : k) v /= sum;
+    vector<float> tmp(img.size());
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x) {
+            float s = 0;
+            for (int i = -half; i <= half; ++i) s += k[i + half] * img[(size_t)y * cols + clampi(x + i, 0, cols - 1)];
+            tmp[(size_t)y * cols + x] = s;
+        }
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x) {
+            float s = 0;
+            for (int i = -half; i <= half; ++i) s += k[i + half] * tmp[(size_t)clampi(y + i, 0, rows - 1) * cols + x];
+            img[(size_t)y * cols + x] = s;
+        }
+}
+
+// returns gradient magnitude scaled to 0..255
+vector<float> gradientMagnitude(const vector<float>& img, int rows, int cols) {
+    vector<float> mag((size_t)rows * cols, 0.0f);
+    auto at = [&](int y, int x) { return img[(size_t)clampi(y, 0, rows - 1) * cols + clampi(x, 0, cols - 1)]; };
+    float mx = 0;
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x) {
+            float gx = (at(y - 1, x + 1) + 2 * at(y, x + 1) + at(y + 1, x + 1))
+                     - (at(y - 1, x - 1) + 2 * at(y, x - 1) + at(y + 1, x - 1));
+            float gy = (at(y + 1, x - 1) + 2 * at(y + 1, x) + at(y + 1, x + 1))
+                     - (at(y - 1, x - 1) + 2 * at(y - 1, x) + at(y - 1, x + 1));
+            float m = sqrtf(gx * gx + gy * gy);
+            mag[(size_t)y * cols + x] = m;
+            mx = max(mx, m);
+        }
+    if (mx > 0) for (auto& v : mag) v = v * 255.0f / mx;
+    return mag;
+}
+
+inline float dist(const Pt& a, const Pt& b) { return hypotf(a.x - b.x, a.y - b.y); }
+
+float signedArea(const vector<Pt>& c) {  // shoelace, positive when the order is clockwise on screen (y down)
+    double a = 0;
+    size_t n = c.size();
+    for (size_t i = 0; i < n; ++i) { const Pt& p = c[i]; const Pt& q = c[(i + 1) % n]; a += (double)p.x * q.y - (double)q.x * p.y; }
+    return (float)(0.5 * a);
+}
+
+}  // namespace snake_impl
+
+using namespace snake_impl;
+
+extern "C" {
+
+// in         : rows x cols x channels (1 = gray, 3 = BGR), uint8
+// init_xy    : n * 2 floats (x0, y0, x1, y1, ...), initial closed contour
+// out_xy     : n * 2 floats, final contour
+// out_info   : 6 floats -> [iterations run, points moved in last iteration, final total energy,
+//                           mean |gradient| on final contour (0..255), converged (1/0), reserved]
+// hist_xy    : optional (may be NULL). Receives snapshots of the contour, n*2 floats each; a snapshot is
+//              stored for iteration 0 and then every `snap_every` iterations.
+// hist_count : number of snapshots written (<= hist_capacity)
+API void snake_greedy(const unsigned char* in, int rows, int cols, int channels,
+                      const float* init_xy, int n,
+                      float alpha, float beta, float gamma, float balloon,
+                      int window,            // half-size of the search window (1 -> 3x3, 2 -> 5x5)
+                      int max_iter, int move_tol,
+                      float sigma,           // Gaussian sigma applied before the gradient
+                      float corner_thresh,   // curvature threshold for beta relaxation (<= 0 disables)
+                      float* out_xy, float* out_info,
+                      float* hist_xy, int hist_capacity, int snap_every, int* hist_count) {
+    if (hist_count) *hist_count = 0;
+    if (n < 3 || rows <= 0 || cols <= 0) { if (out_info) fill(out_info, out_info + 6, 0.0f); return; }
+    window = max(1, window);
+    snap_every = max(1, snap_every);
+
+    vector<float> gray = toGray(in, rows, cols, channels);
+    gaussianBlur(gray, rows, cols, sigma);
+    vector<float> grad = gradientMagnitude(gray, rows, cols);
+    auto gradAt = [&](float x, float y) {  // bilinear
+        x = min(max(x, 0.0f), (float)(cols - 1)); y = min(max(y, 0.0f), (float)(rows - 1));
+        int x0 = (int)floorf(x), y0 = (int)floorf(y);
+        int x1 = min(x0 + 1, cols - 1), y1 = min(y0 + 1, rows - 1);
+        float fx = x - x0, fy = y - y0;
+        return (1 - fy) * ((1 - fx) * grad[(size_t)y0 * cols + x0] + fx * grad[(size_t)y0 * cols + x1])
+             + fy * ((1 - fx) * grad[(size_t)y1 * cols + x0] + fx * grad[(size_t)y1 * cols + x1]);
+    };
+
+    vector<Pt> v(n);
+    for (int i = 0; i < n; ++i) v[i] = {init_xy[2 * i], init_xy[2 * i + 1]};
+    vector<float> betaI(n, beta);
+
+    auto snapshot = [&](int it) {
+        if (!hist_xy || !hist_count || *hist_count >= hist_capacity) return;
+        if (it % snap_every != 0) return;
+        float* dst = hist_xy + (size_t)(*hist_count) * n * 2;
+        for (int i = 0; i < n; ++i) { dst[2 * i] = v[i].x; dst[2 * i + 1] = v[i].y; }
+        ++(*hist_count);
+    };
+    snapshot(0);
+
+    const int W = 2 * window + 1;
+    vector<float> eCont(W * W), eCurv(W * W), eImg(W * W), eBal(W * W);
+    int iter = 0, moved = 0;
+    bool converged = false;
+
+    for (iter = 1; iter <= max_iter; ++iter) {
+        moved = 0;
+        // average spacing of the current contour (continuity reference)
+        float dAvg = 0;
+        for (int i = 0; i < n; ++i) dAvg += dist(v[i], v[(i + 1) % n]);
+        dAvg /= n;
+        const bool cw = signedArea(v) > 0;  // orientation, used for the outward normal of the balloon force
+
+        for (int i = 0; i < n; ++i) {
+            const Pt prev = v[(i + n - 1) % n], next = v[(i + 1) % n], cur = v[i];
+            // outward unit normal at the current point
+            Pt tng = {next.x - prev.x, next.y - prev.y};
+            float tl = hypotf(tng.x, tng.y);
+            Pt nOut = {0, 0};
+            if (tl > 1e-6f) { tng.x /= tl; tng.y /= tl; nOut = cw ? Pt{tng.y, -tng.x} : Pt{-tng.y, tng.x}; }
+
+            float maxCont = 1e-6f, maxCurv = 1e-6f, gMin = 1e30f, gMax = -1e30f;
+            int k = 0;
+            for (int dy = -window; dy <= window; ++dy)
+                for (int dx = -window; dx <= window; ++dx, ++k) {
+                    Pt p = {cur.x + dx, cur.y + dy};
+                    p.x = min(max(p.x, 0.0f), (float)(cols - 1));
+                    p.y = min(max(p.y, 0.0f), (float)(rows - 1));
+                    float d = dist(p, prev) - dAvg;
+                    eCont[k] = d * d;
+                    float cx = prev.x - 2 * p.x + next.x, cy = prev.y - 2 * p.y + next.y;
+                    eCurv[k] = cx * cx + cy * cy;
+                    eImg[k] = gradAt(p.x, p.y);
+                    eBal[k] = -(float)(dx * nOut.x + dy * nOut.y) / (float)(window * 1.4142f);
+                    maxCont = max(maxCont, eCont[k]); maxCurv = max(maxCurv, eCurv[k]);
+                    gMin = min(gMin, eImg[k]); gMax = max(gMax, eImg[k]);
+                }
+            if (gMax - gMin < 60.0f) gMax = gMin + 60.0f;  // flat window (noise only): do not stretch it to 0..1
+
+            int best = window * W + window;  // default: stay
+            float bestE = 1e30f;
+            k = 0;
+            for (int dy = -window; dy <= window; ++dy)
+                for (int dx = -window; dx <= window; ++dx, ++k) {
+                    float e = alpha * eCont[k] / maxCont + betaI[i] * eCurv[k] / maxCurv
+                            + gamma * (-(eImg[k] - gMin) / (gMax - gMin))
+                            + balloon * eBal[k] * max(0.0f, 1.0f - eImg[k] / 80.0f);  // balloon fades on edges
+                    if (e < bestE - 1e-9f) { bestE = e; best = k; }
+                }
+            int bdx = best % W - window, bdy = best / W - window;
+            if (bdx != 0 || bdy != 0) {
+                v[i].x = min(max(cur.x + bdx, 0.0f), (float)(cols - 1));
+                v[i].y = min(max(cur.y + bdy, 0.0f), (float)(rows - 1));
+                ++moved;
+            }
+        }
+
+        // corner relaxation: a point whose curvature is a local maximum and above the threshold gets beta = 0
+        if (corner_thresh > 0) {
+            vector<float> curv(n);
+            for (int i = 0; i < n; ++i) {
+                const Pt &a = v[(i + n - 1) % n], &b = v[i], &c = v[(i + 1) % n];
+                float u1x = b.x - a.x, u1y = b.y - a.y, u2x = c.x - b.x, u2y = c.y - b.y;
+                float l1 = hypotf(u1x, u1y) + 1e-6f, l2 = hypotf(u2x, u2y) + 1e-6f;
+                float dx = u1x / l1 - u2x / l2, dy = u1y / l1 - u2y / l2;
+                curv[i] = hypotf(dx, dy);
+            }
+            for (int i = 0; i < n; ++i) {
+                bool peak = curv[i] > curv[(i + n - 1) % n] && curv[i] > curv[(i + 1) % n];
+                float gHere = gradAt(v[i].x, v[i].y);
+                betaI[i] = (peak && curv[i] > corner_thresh && gHere > 30.0f) ? 0.0f : beta;
+            }
+        }
+
+        snapshot(iter);
+        if (moved <= move_tol) { converged = true; break; }
+    }
+    if (iter > max_iter) iter = max_iter;
+
+    // final energy report (same terms, un-normalised) and mean edge strength
+    double total = 0, meanGrad = 0;
+    float dAvg = 0;
+    for (int i = 0; i < n; ++i) dAvg += dist(v[i], v[(i + 1) % n]);
+    dAvg /= n;
+    for (int i = 0; i < n; ++i) {
+        const Pt &a = v[(i + n - 1) % n], &b = v[i], &c = v[(i + 1) % n];
+        float d = dist(b, a) - dAvg;
+        float cx = a.x - 2 * b.x + c.x, cy = a.y - 2 * b.y + c.y;
+        float g = gradAt(b.x, b.y);
+        total += alpha * d * d + beta * (cx * cx + cy * cy) - gamma * g;
+        meanGrad += g;
+    }
+    for (int i = 0; i < n; ++i) { out_xy[2 * i] = v[i].x; out_xy[2 * i + 1] = v[i].y; }
+    if (out_info) {
+        out_info[0] = (float)iter; out_info[1] = (float)moved; out_info[2] = (float)total;
+        out_info[3] = (float)(meanGrad / n); out_info[4] = converged ? 1.0f : 0.0f; out_info[5] = 0.0f;
+    }
+}
+
+// Helper: Gaussian-smoothed gradient magnitude (0..255) so the UI can display the image-energy map.
+API void snake_gradient_map(const unsigned char* in, int rows, int cols, int channels, float sigma,
+                            unsigned char* out_mag) {
+    vector<float> g = toGray(in, rows, cols, channels);
+    gaussianBlur(g, rows, cols, sigma);
+    vector<float> m = gradientMagnitude(g, rows, cols);
+    for (size_t i = 0; i < m.size(); ++i) out_mag[i] = (unsigned char)min(255.0f, max(0.0f, m[i] + 0.5f));
+}
+
+}  // extern "C"
+
+
+// #####################################################################
+// TASK 2 - PERSON 4 - CHAIN CODE, PERIMETER, AREA
+//   exported: contour_to_chain, chain_differential, chain_decode, chain_measure, chain_fill, polygon_measure
+// #####################################################################
+
+// =====================================================================
+// Person 4 - Contour analysis: Freeman chain code, perimeter and area
+//
+// Pure C++17, no OpenCV needed. Exposed through a C API so Python can call it with ctypes.
+// It takes the final snake contour (Person 3) and turns it into:
+//   1. a closed 8-connected pixel boundary  -> Freeman chain code (start point + codes 0..7)
+//   2. perimeter  = (#even codes) + sqrt(2) * (#odd codes)
+//   3. area       = shoelace formula evaluated on the chain code itself
+//      (plus the filled-pixel count, and the same two numbers for the raw float contour)
+//
+// Chain code convention (Freeman, 8 directions, as seen on screen, image y axis points down):
+//        (3) (2) (1)   <- up-left, up, up-right
+//      (4) <-- o --> (0)
+//        (5) (6) (7)   <- down-left, down, down-right
+//   code : 0     1      2     3      4      5      6     7
+//   (dx,dy): (1,0) (1,-1) (0,-1) (-1,-1) (-1,0) (-1,1) (0,1) (1,1)
+//
+// Output coordinates are (x, y) in pixel units, x = column, y = row (same as snake_engine).
+// =====================================================================
+
+namespace chain_impl {
+
+const int DX[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+const int DY[8] = {0, -1, -1, -1, 0, 1, 1, 1};
+
+// direction code of a single 8-connected step (-1 if the step is not a neighbour move)
+inline int codeOf(int dx, int dy) {
+    for (int c = 0; c < 8; ++c) if (DX[c] == dx && DY[c] == dy) return c;
+    return -1;
+}
+
+// Append the 8-connected pixel path (a -> b), excluding a and including b (Bresenham).
+void lineSteps(int x0, int y0, int x1, int y1, vector<uint8_t>& codes) {
+    int dx = abs(x1 - x0), dy = abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy, x = x0, y = y0;
+    while (x != x1 || y != y1) {
+        int e2 = 2 * err, nx = x, ny = y;
+        if (e2 > -dy) { err -= dy; nx += sx; }
+        if (e2 <  dx) { err += dx; ny += sy; }
+        codes.push_back((uint8_t)codeOf(nx - x, ny - y));
+        x = nx; y = ny;
+    }
+}
+
+// Remove spurs: a step immediately followed by its opposite (c, c+4) walks out and back over the same
+// pixel and adds nothing to the shape. Handles the wrap-around too, which moves the start point.
+void cancelSpurs(vector<uint8_t>& codes, int& sx, int& sy) {
+    vector<uint8_t> st;
+    for (uint8_t c : codes) {
+        if (!st.empty() && st.back() == (c + 4) % 8) st.pop_back(); else st.push_back(c);
+    }
+    size_t lo = 0, hi = st.size();
+    while (hi - lo >= 2 && st[lo] == (st[hi - 1] + 4) % 8) {
+        sx += DX[st[lo]]; sy += DY[st[lo]];  // the path now starts one step further along
+        ++lo; --hi;
+    }
+    codes.assign(st.begin() + lo, st.begin() + hi);
+}
+
+}  // namespace chain_impl
+
+using namespace chain_impl;
+
+extern "C" {
+
+// ---------------------------------------------------------------------
+// Float contour (x, y) -> closed Freeman chain code.
+// xy        : n * 2 floats, ordered closed contour (e.g. the snake output)
+// start_xy  : 2 ints, receives the integer start pixel (x, y)
+// codes     : caller buffer for the chain code (values 0..7)
+// capacity  : size of `codes`
+// returns   : chain length. If it is > capacity nothing was written to `codes`; call again with a
+//             bigger buffer. Returns 0 for a degenerate contour.
+// ---------------------------------------------------------------------
+API int contour_to_chain(const float* xy, int n, int* start_xy, unsigned char* codes, int capacity) {
+    if (n < 3) return 0;
+    vector<int> px(n), py(n);
+    for (int i = 0; i < n; ++i) { px[i] = (int)lroundf(xy[2 * i]); py[i] = (int)lroundf(xy[2 * i + 1]); }
+    int sx = px[0], sy = py[0];
+    vector<uint8_t> c;
+    for (int i = 0; i < n; ++i) lineSteps(px[i], py[i], px[(i + 1) % n], py[(i + 1) % n], c);  // closes the loop
+    cancelSpurs(c, sx, sy);
+    if (c.size() < 4) return 0;
+    start_xy[0] = sx; start_xy[1] = sy;
+    int len = (int)c.size();
+    if (len <= capacity) for (int i = 0; i < len; ++i) codes[i] = c[i];
+    return len;
+}
+
+// Rotation-invariant first difference of a chain code: d_i = (c_i - c_{i-1}) mod 8 (cyclic).
+API void chain_differential(const unsigned char* codes, int len, unsigned char* out) {
+    for (int i = 0; i < len; ++i) out[i] = (unsigned char)((codes[i] - codes[(i + len - 1) % len] + 8) % 8);
+}
+
+// Rebuild the boundary pixels from the chain code (len points: start, ..., last one before returning to start).
+API void chain_decode(const int* start_xy, const unsigned char* codes, int len, int* out_xy) {
+    int x = start_xy[0], y = start_xy[1];
+    for (int i = 0; i < len; ++i) {
+        out_xy[2 * i] = x; out_xy[2 * i + 1] = y;
+        x += DX[codes[i] & 7]; y += DY[codes[i] & 7];
+    }
+}
+
+// Measurements computed from the chain code only.
+// out[0] perimeter = n_even + sqrt(2) * n_odd
+// out[1] area (shoelace on the decoded boundary)
+// out[2] n_even   out[3] n_odd   out[4] closed (1 if the code returns to the start pixel)
+API void chain_measure(const unsigned char* codes, int len, double* out) {
+    long long x = 0, y = 0, twiceArea = 0;
+    int even = 0, odd = 0;
+    for (int i = 0; i < len; ++i) {
+        int c = codes[i] & 7, dx = DX[c], dy = DY[c];
+        twiceArea += x * (long long)dy - y * (long long)dx;  // x_i*y_{i+1} - x_{i+1}*y_i, relative to the start
+        x += dx; y += dy;
+        if (c & 1) ++odd; else ++even;
+    }
+    out[0] = even + sqrt(2.0) * odd;
+    out[1] = 0.5 * fabs((double)twiceArea);
+    out[2] = even; out[3] = odd; out[4] = (x == 0 && y == 0) ? 1.0 : 0.0;
+}
+
+// Number of pixels enclosed by the boundary, boundary pixels included.
+// The 8-connected boundary is a wall for a 4-connected flood fill started outside the bounding box;
+// whatever the flood cannot reach is inside. If `mask` (rows * cols, uint8) is not NULL it receives
+// 255 for those pixels (clipped to the image).
+API long long chain_fill(const int* start_xy, const unsigned char* codes, int len, int rows, int cols,
+                         unsigned char* mask) {
+    vector<int> pts((size_t)len * 2);
+    chain_decode(start_xy, codes, len, pts.data());
+    int x0 = pts[0], x1 = pts[0], y0 = pts[1], y1 = pts[1];
+    for (int i = 0; i < len; ++i) {
+        x0 = min(x0, pts[2 * i]); x1 = max(x1, pts[2 * i]);
+        y0 = min(y0, pts[2 * i + 1]); y1 = max(y1, pts[2 * i + 1]);
+    }
+    int W = x1 - x0 + 3, H = y1 - y0 + 3;  // 1 pixel margin so the flood can walk around the shape
+    vector<uint8_t> grid((size_t)W * H, 0);  // 0 free, 1 boundary, 2 outside
+    for (int i = 0; i < len; ++i) grid[(size_t)(pts[2 * i + 1] - y0 + 1) * W + (pts[2 * i] - x0 + 1)] = 1;
+    vector<int> stack = {0};
+    grid[0] = 2;
+    while (!stack.empty()) {
+        int p = stack.back(); stack.pop_back();
+        int px = p % W, py = p / W;
+        for (int k = 0; k < 4; ++k) {
+            int nx = px + (k == 0) - (k == 1), ny = py + (k == 2) - (k == 3);
+            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+            size_t q = (size_t)ny * W + nx;
+            if (grid[q] == 0) { grid[q] = 2; stack.push_back((int)q); }
+        }
+    }
+    if (mask) fill(mask, mask + (size_t)rows * cols, (unsigned char)0);
+    long long count = 0;
+    for (int gy = 0; gy < H; ++gy)
+        for (int gx = 0; gx < W; ++gx) {
+            if (grid[(size_t)gy * W + gx] == 2) continue;
+            ++count;
+            int ix = gx + x0 - 1, iy = gy + y0 - 1;
+            if (mask && ix >= 0 && iy >= 0 && ix < cols && iy < rows) mask[(size_t)iy * cols + ix] = 255;
+        }
+    return count;
+}
+
+// Perimeter and area of the raw float contour (straight segments between the points), for comparison.
+// out[0] perimeter   out[1] area (shoelace)
+API void polygon_measure(const float* xy, int n, double* out) {
+    double per = 0, a2 = 0;
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        double xi = xy[2 * i], yi = xy[2 * i + 1], xj = xy[2 * j], yj = xy[2 * j + 1];
+        per += hypot(xj - xi, yj - yi);
+        a2 += xi * yj - xj * yi;
+    }
+    out[0] = per; out[1] = 0.5 * fabs(a2);
+}
+
+}  // extern "C"
+

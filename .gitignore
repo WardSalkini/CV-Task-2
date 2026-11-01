@@ -1,40 +1,17 @@
-# Native build outputs
-build/
-build-*/
-*.dll
-*.exe
-*.o
-*.obj
-*.dll.a
-*.so
-*.dylib
-*.a
-cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-compile_commands.json
 
-# Local environments and editor files
-.venv/
-venv/
-.vscode/
-__pycache__/
-.streamlit/
-*.pyc
-*.pdb
-*.ilk
-*.user
-*.suo
-*.code-workspace
-
-# Local logs and temporary files
-*.log
-build-log.txt
-syntax-log.txt
-tempCodeRunnerFile.py
 .idea/
-cmake-build-*/
+
+
+cmake-build-debug/
+
+
 *.dll
-tempCodeRunnerFile.py
+*.exp
+*.lib
+*.obj
+*.exe
+engine
+
+
+__pycache__/
+*.pyc
