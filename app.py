@@ -12,6 +12,7 @@ WHERE IS MY PART?  (search for the tag; engine.cpp uses the same tags)
   MAIN                 page layout: one shared image, a part selector, settings on the left, results on the right
 """
 import base64
+import csv
 import ctypes
 import hashlib
 import io
@@ -25,7 +26,7 @@ import zipfile
 import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image
+from PIL import Image, ImageDraw
 
 st.set_page_config(layout="wide", page_title="Computer Vision Workbench")
 
@@ -252,8 +253,7 @@ lib.canny_detect_shapes.argtypes = [
     c_int, c_float, c_float, c_float, c_int, c_int,
     c_float, c_float, c_int, c_int, c_int,
     c_int, c_int, c_int, c_int, c_int, c_int,
-    c_int, c_int, c_int, c_int, c_int, c_int,
-    c_int, c_int,
+    c_int, c_int, c_int, c_int, c_float, c_int, c_int, c_int, c_int,
     U8P, U8P, U8P, c_int, I32P, I32P, U8P, F32P, I32P,
     F32P, I32P, F32P, I32P, F32P,
 ]
@@ -282,23 +282,28 @@ def hough_controls():
     with st.expander("Ellipse parameters", expanded=use_ellipses):
         min_major = number_input("Minimum major axis (diameter)", 4, 2000, 30)
         max_major = number_input("Maximum major axis (diameter)", 5, 3000, 300)
-        min_minor = number_input("Minimum minor axis", 2, 1500, 10)
-        ellipse_threshold = number_input("Ellipse vote threshold", 3, 400, 12)
-        max_points = number_input("Maximum sampled edge points", 50, 1000, 300)
-        max_ellipses = slider("Maximum ellipses", 1, 16, 4)
+        min_minor = number_input("Minimum minor axis (diameter)", 2, 1500, 10)
+        st.caption("Detection floor (support): 0.15")
+        min_support = slider("Minimum support (fraction of outline)", 0.05, 1.00, 0.35, 0.05)
+        max_points = number_input("Maximum sampled edge points", 50, 4000, 300)
+        max_working_size = number_input("Max working size (px, 0 = off)", 0, 10000, 600)
+        st.caption("Ellipse voting cost grows roughly with N^3.")
+        max_ellipses = slider("Maximum ellipses", 1, 64, 16)
     return dict(
         lines=use_lines, circles=use_circles, ellipses=use_ellipses, thickness=thickness,
         rho_step=rho_step, theta_step=theta_step, line_threshold=line_threshold, line_nms=line_nms,
         max_lines=max_lines, rmin=rmin, rmax=rmax, rstep=rstep, circle_threshold=circle_threshold,
         min_dist=min_dist, max_circles=max_circles, gradient_mode=gradient_mode, min_major=min_major,
-        max_major=max_major, min_minor=min_minor, ellipse_threshold=ellipse_threshold,
-        max_points=max_points, max_ellipses=max_ellipses)
+        max_major=max_major, min_minor=min_minor, min_support=min_support,
+        max_points=max_points, max_working_size=max_working_size, max_ellipses=max_ellipses)
 
 
 def hough_detect(image, c, h):
     """Canny edges plus the Hough detectors selected in `h`. Returns edges, overlay, shapes and accumulators."""
     rows, cols = image.shape[:2]
     flags = int(h["lines"]) | (int(h["circles"]) << 1) | (int(h["ellipses"]) << 2)
+    if h["ellipses"]:
+        flags |= 8
     edges = np.empty((rows, cols), np.uint8)
     overlay = np.empty((rows, cols, 3), np.uint8)
     line_capacity = 4096 * 360
@@ -306,18 +311,19 @@ def hough_detect(image, c, h):
     circle_acc = np.zeros((rows, cols), np.uint8)
     lines = np.zeros((h["max_lines"], 7), np.float32)
     circles = np.zeros((h["max_circles"], 4), np.float32)
-    ellipses = np.zeros((h["max_ellipses"], 6), np.float32)
+    ellipse_buffer = 64
+    ellipses = np.zeros((ellipse_buffer, 7), np.float32)
     line_w, line_h = c_int(), c_int()
     line_n, circle_n, ellipse_n = c_int(), c_int(), c_int()
-    info = np.zeros(4, np.float32)
+    info = np.zeros(10, np.float32)
     lib.canny_detect_shapes(
         u8(image), rows, cols, 1 if image.ndim == 2 else 3,
         int(c["ksize"]), float(c["sigma"]), float(c["low"]), float(c["high"]), int(c["auto"]), flags,
         float(h["rho_step"]), float(h["theta_step"]), int(h["line_threshold"]), int(h["line_nms"]),
         int(h["max_lines"]), int(h["rmin"]), int(h["rmax"]), int(h["rstep"]), int(h["circle_threshold"]),
         int(h["min_dist"]), int(h["max_circles"]), int(h["gradient_mode"]),
-        int(h["min_major"]), int(h["max_major"]), int(h["min_minor"]), int(h["ellipse_threshold"]),
-        int(h["max_points"]), int(h["max_ellipses"]), int(h["thickness"]),
+        int(h["min_major"]), int(h["max_major"]), int(h["min_minor"]), 0.15,
+        int(h["max_points"]), int(h["max_working_size"]), ellipse_buffer, int(h["thickness"]),
         u8(edges), u8(overlay), u8(line_acc), line_capacity, ctypes.byref(line_w), ctypes.byref(line_h),
         u8(circle_acc), f32(lines), ctypes.byref(line_n), f32(circles), ctypes.byref(circle_n),
         f32(ellipses), ctypes.byref(ellipse_n), f32(info))
@@ -325,14 +331,54 @@ def hough_detect(image, c, h):
         if line_w.value and line_h.value else np.zeros((1, 1), np.uint8)
     return {"edges": edges, "overlay": overlay, "lines": lines[:line_n.value].copy(),
             "circles": circles[:circle_n.value].copy(), "ellipses": ellipses[:ellipse_n.value].copy(),
-            "line_acc": acc.copy(), "circle_acc": circle_acc, "thresholds": (float(info[0]), float(info[1]))}
+            "line_acc": acc.copy(), "circle_acc": circle_acc, "thresholds": (float(info[0]), float(info[1])),
+            "line_rho_max": float(np.ceil(np.hypot(cols, rows))),
+            "line_rho_step": float(h["rho_step"]), "line_theta_step": float(h["theta_step"]),
+            "sample_ratio": float(info[4]), "raw_edge_count": int(info[5]),
+            "ellipse_scale": float(info[6]), "ellipse_work_width": int(info[7]),
+            "ellipse_work_height": int(info[8]), "ellipse_work_edge_count": int(info[9])}
+
+
+def draw_ellipse_overlay(overlay, ellipses, thickness):
+    """Draw filtered engine ellipses in Python using the engine's coordinate convention."""
+    rgb = Image.fromarray(np.ascontiguousarray(overlay[..., ::-1])).convert("RGB")
+    draw = ImageDraw.Draw(rgb)
+    color = (220, 0, 255)
+    width = max(1, int(thickness))
+    cross = 3 * width
+    for x, y, a, b, angle, _votes, _support in ellipses:
+        angle_rad = np.deg2rad(angle)
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        q = np.linspace(0.0, 2.0 * np.pi, 361)
+        points = np.column_stack((
+            x + a * np.cos(q) * cos_a - b * np.sin(q) * sin_a,
+            y + a * np.cos(q) * sin_a + b * np.sin(q) * cos_a,
+        ))
+        polyline = [tuple(np.rint(point).astype(int)) for point in points]
+        draw.line(polyline, fill=color, width=width, joint="curve")
+        center = (int(round(x)), int(round(y)))
+        draw.line((center[0] - cross, center[1], center[0] + cross, center[1]),
+                  fill=color, width=max(2, width // 2))
+        draw.line((center[0], center[1] - cross, center[0], center[1] + cross),
+                  fill=color, width=max(2, width // 2))
+    return np.ascontiguousarray(np.asarray(rgb)[..., ::-1])
+
+
+def ellipse_csv(ellipses):
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    headers = ["center_x", "center_y", "semi_major", "semi_minor", "angle", "votes", "support"]
+    writer.writerow(headers)
+    writer.writerows(ellipses.tolist())
+    return output.getvalue()
 
 
 def hough_accumulators_tab(result, h):
     if not (h["lines"] or h["circles"]):
         st.info("Enable line or circle detection to see the accumulators.")
     if h["lines"]:
-        show(colormap(result["line_acc"]), "Line accumulator (rho x theta)")
+        resized = Image.fromarray(result["line_acc"]).resize((600, 400), Image.BILINEAR)
+        show(colormap(np.asarray(resized)), "Line accumulator (rho x theta)")
     if h["circles"]:
         show(colormap(result["circle_acc"]), "Circle center accumulator")
 
@@ -347,9 +393,11 @@ def hough_data_tab(result, h):
         st.subheader("Circles: center_x, center_y, radius, votes")
         table([dict(zip(["center_x", "center_y", "radius", "votes"], r)) for r in result["circles"].tolist()])
     if h["ellipses"]:
-        st.subheader("Ellipses: center_x, center_y, semi_major, semi_minor, angle, votes")
-        table([dict(zip(["center_x", "center_y", "semi_major", "semi_minor", "angle", "votes"], r))
-               for r in result["ellipses"].tolist()])
+        headers = ["center_x", "center_y", "semi_major", "semi_minor", "angle", "votes", "support"]
+        st.subheader("Ellipses: center_x, center_y, semi_major, semi_minor, angle, votes, support")
+        table([dict(zip(headers, r)) for r in result["ellipses"].tolist()])
+        st.download_button("Download detections CSV", ellipse_csv(result["ellipses"]),
+                           "ellipse_detections.csv", "text/csv")
 
 
 # =====================================================================
@@ -624,7 +672,7 @@ def run_snake(image, p):
     n = len(init)
     max_snaps = 400
     out = np.zeros((n, 2), np.float32)
-    info = np.zeros(6, np.float32)
+    info = np.zeros(10, np.float32)
     hist = np.zeros((max_snaps, n, 2), np.float32)
     count = c_int(0)
     lib.snake_greedy(u8(image), h, w, 1 if image.ndim == 2 else 3, f32(init), n,
@@ -907,6 +955,10 @@ def run_canny_hough(image, canny_p, hough_p):
     return result
 
 
+def engine_hough_settings(h):
+    return {key: value for key, value in h.items() if key not in {"min_support", "max_ellipses"}}
+
+
 def describe_canny(c, h):
     d = {"Gaussian kernel": c["ksize"], "Sigma": c["sigma"], "Automatic thresholds": c["auto"]}
     if not c["auto"]:
@@ -921,8 +973,12 @@ def describe_canny(c, h):
                   "Maximum circles": h["max_circles"], "Gradient-guided voting": h["gradient_mode"]})
     if h["ellipses"]:
         d.update({"Minimum major axis": h["min_major"], "Maximum major axis": h["max_major"],
-                  "Minimum minor axis": h["min_minor"], "Ellipse vote threshold": h["ellipse_threshold"],
-                  "Maximum sampled edge points": h["max_points"], "Maximum ellipses": h["max_ellipses"]})
+                  "Minimum minor axis (diameter)": h["min_minor"],
+                  "Detection floor (support)": 0.15,
+                  "Minimum support (fraction of outline)": h["min_support"],
+                  "Maximum sampled edge points": h["max_points"],
+                  "Max working size (px)": h["max_working_size"],
+                  "Maximum ellipses": h["max_ellipses"]})
     for name in ("lines", "circles", "ellipses"):
         d[f"Detect {name}"] = h[name]
     return d
@@ -933,7 +989,16 @@ def canny_part(image, image_id):
         pin = compare_buttons("canny")
         canny_p = canny_controls()        # PERSON 1
         hough_p = hough_controls()        # PERSON 2
-    result = run_canny_hough(image, canny_p, hough_p)
+    result = run_canny_hough(image, canny_p, engine_hough_settings(hough_p))
+    if hough_p["ellipses"]:
+        support = result["ellipses"][:, 6]
+        keep = support >= hough_p["min_support"]
+        result["ellipses"] = result["ellipses"][keep][:hough_p["max_ellipses"]].copy()
+        result["overlay"] = draw_ellipse_overlay(result["overlay"], result["ellipses"], hough_p["thickness"])
+        if result["sample_ratio"] < 0.10:
+            st.warning("Sparse sampling: raise Maximum sampled edge points or thin the edges")
+    else:
+        result["ellipses"] = np.empty((0, 7), np.float32)
 
     now = {"settings": describe_canny(canny_p, hough_p), "edges": result["edges"], "overlay": result["overlay"],
            "numbers": {"Edge pixels": int(np.count_nonzero(result["edges"])),
@@ -943,12 +1008,23 @@ def canny_part(image, image_id):
     if pin:
         st.session_state["pinned_canny"] = dict(now, image_id=image_id)
 
-    m = st.columns(5)
+    m = st.columns(8)
     m[0].metric("Edge pixels", f"{now['numbers']['Edge pixels']:,}")
     m[1].metric("Thresholds used", f"{result['thresholds'][0]:.0f} / {result['thresholds'][1]:.0f}")
     m[2].metric("Lines", now["numbers"]["Lines"])
     m[3].metric("Circles", now["numbers"]["Circles"])
     m[4].metric("Ellipses", now["numbers"]["Ellipses"])
+    m[5].metric("Sample ratio", f"{result['sample_ratio']:.1%}" if hough_p["ellipses"] else "off")
+    m[6].metric(
+        "Ellipse working size",
+        f"{result['ellipse_work_width']} x {result['ellipse_work_height']} "
+        f"({result['ellipse_scale']:.3f}x)" if hough_p["ellipses"] else "off",
+    )
+    m[7].metric(
+        "Working edge pixels",
+        f"{result['ellipse_work_edge_count']:,}" if hough_p["ellipses"] else "off",
+    )
+    st.caption(f"Image size: {image.shape[1]} x {image.shape[0]} px")
     tabs = st.tabs(["Superimposition", "Canny steps", "Hough accumulators", "Detected data", "Compare"])
     with tabs[0]:
         a, b, c = st.columns(3)

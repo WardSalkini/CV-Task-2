@@ -294,7 +294,7 @@ extern "C" {
 
 struct LineResult { float rho, theta, votes, x1, y1, x2, y2; };
 struct CircleResult { float x, y, radius, votes; };
-struct EllipseResult { float x, y, a, b, angle, votes; };
+struct EllipseResult { float x, y, a, b, angle, votes, support; };
 
 static void putPixel(vector<uint8_t>& out, int w, int h, int x, int y,
                      uint8_t b, uint8_t g, uint8_t r, int thickness) {
@@ -395,7 +395,7 @@ static vector<LineResult> detectLines(const vector<uint8_t>& edges, int w, int h
 static vector<CircleResult> detectCircles(const vector<uint8_t>& edges,
                                           const vector<float>& gx, const vector<float>& gy,
                                           int w, int h, int rmin, int rmax, int rstep,
-                                          int threshold, int minDist, bool gradientMode,
+                                          int threshold, int minDist, int maxCircles, bool gradientMode,
                                           vector<uint8_t>& projection) {
     rmin = max(1, rmin); rmax = max(rmin, rmax); rstep = max(1, rstep);
     int numR = (rmax - rmin) / rstep + 1;
@@ -455,87 +455,124 @@ static vector<CircleResult> detectCircles(const vector<uint8_t>& edges,
         bool keep = true;
         for (const auto& circle : result)
             if (hypot(circle.x - candidate.x, circle.y - candidate.y) < minDist &&
-                fabs(circle.radius - radius) < 2.0f * rstep) { keep = false; break; }
+                fabs(circle.radius - radius) < max(10.0f, 3.5f * rstep)) { keep = false; break; }
         if (keep) {
             result.push_back({(float)candidate.x, (float)candidate.y, radius, (float)candidate.votes});
-            if (result.size() >= 32) break;
+            if ((int)result.size() >= maxCircles) break;
         }
     }
     return result;
 }
 
-static vector<EllipseResult> detectEllipses(const vector<uint8_t>& edges, int w, int h,
+static vector<EllipseResult> detectEllipses(const vector<uint8_t>& edges,
+                                            const vector<float>& gx, const vector<float>& gy,
+                                            int w, int h,
                                             int minMajor, int maxMajor, int minMinor,
-                                            int threshold, int maxPoints) {
-    vector<pair<int, int>> pts;
+                                            float supportFloor, int maxPoints, int maxEllipses,
+                                            float& sampleRatio, int& totalEdges) {
+    supportFloor = max(0.0f, min(1.0f, supportFloor));
+    struct SamplePoint { float x, y, nx, ny; };
+    vector<SamplePoint> pts;
     for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
-        if (edges[(size_t)y * w + x]) pts.push_back({x, y});
+        if (edges[(size_t)y * w + x]) {
+            size_t index = (size_t)y * w + x;
+            float magnitude = hypot(gx[index], gy[index]);
+            float nx = magnitude > 1e-6f ? gx[index] / magnitude : 0.0f;
+            float ny = magnitude > 1e-6f ? gy[index] / magnitude : 0.0f;
+            pts.push_back({(float)x, (float)y, nx, ny});
+        }
+    totalEdges = (int)pts.size();
     if ((int)pts.size() > maxPoints) {
-        vector<pair<int, int>> sampled;
+        vector<SamplePoint> sampled;
         int stride = (int)ceil((double)pts.size() / maxPoints);
         for (int i = 0; i < (int)pts.size(); i += stride) sampled.push_back(pts[i]);
         pts.swap(sampled);
     }
+    sampleRatio = totalEdges > 0 ? (float)pts.size() / (float)totalEdges : 0.0f;
+    float minMinorRadius = 0.5f * (float)minMinor;
     struct Candidate { EllipseResult ellipse; vector<int> inliers; };
     vector<Candidate> candidates;
     for (int i = 0; i < (int)pts.size(); ++i)
         for (int j = i + 1; j < (int)pts.size(); ++j) {
-            float dx = (float)pts[j].first - pts[i].first, dy = (float)pts[j].second - pts[i].second;
+            float dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y;
             float a = 0.5f * hypot(dx, dy);
-            if (2 * a < minMajor || 2 * a > maxMajor || a < minMinor) continue;
-            float cx = (pts[i].first + pts[j].first) * 0.5f, cy = (pts[i].second + pts[j].second) * 0.5f;
+            if (2 * a < minMajor || 2 * a > maxMajor || a < minMinorRadius) continue;
+            float uxMajor = dx / (2.0f * a), uyMajor = dy / (2.0f * a);
+            if (fabs(pts[i].nx * uxMajor + pts[i].ny * uyMajor) < 0.65f ||
+                fabs(pts[j].nx * uxMajor + pts[j].ny * uyMajor) < 0.65f) continue;
+            float cx = (pts[i].x + pts[j].x) * 0.5f, cy = (pts[i].y + pts[j].y) * 0.5f;
             float ang = atan2f(dy, dx);
             vector<int> accB((int)ceil(a) + 1, 0);
+            vector<vector<int>> quadrantVotes(accB.size(), vector<int>(4, 0));
             for (auto q : pts) {
-                float ux = q.first - cx, uy = q.second - cy;
-                float xr = ux * cosf(ang) + uy * sinf(ang), yr = -ux * sinf(ang) + uy * cosf(ang);
+                float qx = q.x - cx, qy = q.y - cy;
+                if (qx * qx + qy * qy > (a + 2.0f) * (a + 2.0f)) continue;
+                float xr = qx * cosf(ang) + qy * sinf(ang), yr = -qx * sinf(ang) + qy * cosf(ang);
                 if (fabs(xr) >= a || fabs(yr) <= 1.0f) continue;
                 float denominator = a * a - xr * xr;
                 if (denominator <= 1e-5f) continue;
                 float b2 = (a * a * yr * yr) / denominator;
                 float b = sqrtf(max(0.0f, b2));
-                if (b >= minMinor && b <= a) {
+                if (b >= minMinorRadius && b <= a) {
                     int bin = (int)lround(b);
                     if (bin >= 0 && bin < (int)accB.size()) {
                         ++accB[bin];
-                        if (bin > 0) ++accB[bin - 1];
-                        if (bin + 1 < (int)accB.size()) ++accB[bin + 1];
+                        int quadrant = (qy < 0.0f ? 0 : 2) + (qx < 0.0f ? 0 : 1);
+                        ++quadrantVotes[bin][quadrant];
                     }
                 }
             }
+            int win = max(1, (int)lround(0.04f * a));
+            vector<int> smooth(accB.size(), 0);
+            for (int b = 0; b < (int)accB.size(); ++b) {
+                int first = max(0, b - win), last = min((int)accB.size() - 1, b + win);
+                for (int k = first; k <= last; ++k) smooth[b] += accB[k];
+            }
             int bestBin = 0, maxVotes = 0;
-            for (int b = max(1, minMinor); b < (int)accB.size(); ++b)
-                if (accB[b] > maxVotes) { maxVotes = accB[b]; bestBin = b; }
-            if (maxVotes < threshold) continue;
+            for (int b = max(1, (int)ceil(minMinorRadius)); b < (int)smooth.size(); ++b)
+                if (smooth[b] > maxVotes) { maxVotes = smooth[b]; bestBin = b; }
+            if (bestBin <= 0) continue;
+            int supportedQuadrants = 0;
+            for (int votes : quadrantVotes[bestBin])
+                if (votes > 0) ++supportedQuadrants;
+            if (supportedQuadrants < 3) continue;
+            const float pi = 3.14159265359f;
+            float perim = pi * (3.0f * (a + bestBin) -
+                                sqrtf((3.0f * a + bestBin) * (a + 3.0f * bestBin)));
+            float expected = perim * sampleRatio;
+            float support = expected > 1e-6f ? (float)maxVotes / expected : 0.0f;
+            if (support < supportFloor) continue;
             EllipseResult ellipse{cx, cy, a, (float)bestBin,
-                                  ang * 180.0f / 3.14159265359f, (float)maxVotes};
+                                  ang * 180.0f / pi, (float)maxVotes, support};
             vector<int> inliers;
             for (int k = 0; k < (int)pts.size(); ++k) {
-                float ux = pts[k].first - cx, uy = pts[k].second - cy;
-                float xr = ux * cosf(ang) + uy * sinf(ang), yr = -ux * sinf(ang) + uy * cosf(ang);
+                float qx = pts[k].x - cx, qy = pts[k].y - cy;
+                float xr = qx * cosf(ang) + qy * sinf(ang), yr = -qx * sinf(ang) + qy * cosf(ang);
                 float error = fabs((xr * xr) / (a * a) + (yr * yr) / (bestBin * bestBin) - 1.0f);
                 if (error < 0.12f) inliers.push_back(k);
             }
             candidates.push_back({ellipse, inliers});
         }
     sort(candidates.begin(), candidates.end(),
-         [](const Candidate& a, const Candidate& b) { return a.ellipse.votes > b.ellipse.votes; });
+         [](const Candidate& a, const Candidate& b) { return a.ellipse.support > b.ellipse.support; });
     vector<EllipseResult> result;
     vector<bool> used(pts.size(), false);
     for (const auto& candidate : candidates) {
         bool duplicate = false;
         for (const auto& existing : result)
-            if (hypot(existing.x - candidate.ellipse.x, existing.y - candidate.ellipse.y) < 20.0f &&
-                fabs(existing.a - candidate.ellipse.a) < 15.0f &&
-                fabs(existing.b - candidate.ellipse.b) < 15.0f) { duplicate = true; break; }
+            if (hypot(existing.x - candidate.ellipse.x, existing.y - candidate.ellipse.y) <
+                    0.5f * min(existing.b, candidate.ellipse.b) &&
+                fabs(existing.a - candidate.ellipse.a) < 0.3f * existing.a &&
+                fabs(existing.b - candidate.ellipse.b) < 0.3f * existing.b) { duplicate = true; break; }
         if (duplicate) continue;
-        bool hasUnusedInlier = false;
+        int unusedCount = 0;
         for (int index : candidate.inliers)
-            if (!used[index]) { hasUnusedInlier = true; break; }
-        if (!hasUnusedInlier) continue;
+            if (!used[index]) ++unusedCount;
+        int requiredUnused = (int)ceil(0.6f * candidate.inliers.size());
+        if (unusedCount < requiredUnused) continue;
         result.push_back(candidate.ellipse);
         for (int index : candidate.inliers) used[index] = true;
-        if (result.size() >= 8) break;
+        if ((int)result.size() >= maxEllipses) break;
     }
     return result;
 }
@@ -553,18 +590,79 @@ static void drawEllipse(vector<uint8_t>& out, int w, int h, const EllipseResult&
     }
 }
 
+static vector<uint8_t> makeWorkingImage(const unsigned char* in, int rows, int cols,
+                                        int channels, float scale, float sigma) {
+    int workRows = max(1, (int)lround(rows * scale));
+    int workCols = max(1, (int)lround(cols * scale));
+    int radius = max(1, (int)ceil(3.0f * sigma));
+    size_t sourceSize = (size_t)rows * cols * channels;
+    vector<float> horizontal(sourceSize), blurred(sourceSize);
+    vector<float> kernel(2 * radius + 1);
+    float kernelSum = 0.0f;
+    for (int i = -radius; i <= radius; ++i) {
+        kernel[i + radius] = expf(-(float)(i * i) / (2.0f * sigma * sigma));
+        kernelSum += kernel[i + radius];
+    }
+    for (float& value : kernel) value /= kernelSum;
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x)
+            for (int ch = 0; ch < channels; ++ch) {
+                float sum = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    int xx = max(0, min(cols - 1, x + k));
+                    sum += kernel[k + radius] * in[((size_t)y * cols + xx) * channels + ch];
+                }
+                horizontal[((size_t)y * cols + x) * channels + ch] = sum;
+            }
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x)
+            for (int ch = 0; ch < channels; ++ch) {
+                float sum = 0.0f;
+                for (int k = -radius; k <= radius; ++k) {
+                    int yy = max(0, min(rows - 1, y + k));
+                    sum += kernel[k + radius] * horizontal[((size_t)yy * cols + x) * channels + ch];
+                }
+                blurred[((size_t)y * cols + x) * channels + ch] = sum;
+            }
+
+    vector<uint8_t> output((size_t)workRows * workCols * channels);
+    for (int y = 0; y < workRows; ++y)
+        for (int x = 0; x < workCols; ++x) {
+            float sourceY = (y + 0.5f) / scale - 0.5f;
+            float sourceX = (x + 0.5f) / scale - 0.5f;
+            sourceY = max(0.0f, min((float)(rows - 1), sourceY));
+            sourceX = max(0.0f, min((float)(cols - 1), sourceX));
+            int y0 = (int)floor(sourceY), x0 = (int)floor(sourceX);
+            int y1 = min(rows - 1, y0 + 1), x1 = min(cols - 1, x0 + 1);
+            float fy = sourceY - y0, fx = sourceX - x0;
+            for (int ch = 0; ch < channels; ++ch) {
+                float v00 = blurred[((size_t)y0 * cols + x0) * channels + ch];
+                float v01 = blurred[((size_t)y0 * cols + x1) * channels + ch];
+                float v10 = blurred[((size_t)y1 * cols + x0) * channels + ch];
+                float v11 = blurred[((size_t)y1 * cols + x1) * channels + ch];
+                float top = v00 + fx * (v01 - v00);
+                float bottom = v10 + fx * (v11 - v10);
+                float value = top + fy * (bottom - top);
+                output[((size_t)y * workCols + x) * channels + ch] =
+                    (uint8_t)lround(max(0.0f, min(255.0f, value)));
+            }
+        }
+    return output;
+}
+
 
 extern "C" {
-    // flags: bit 0 lines, bit 1 circles, bit 2 ellipses.
+    // flags: bit 0 lines, bit 1 circles, bit 2 ellipses, bit 3 skip ellipse drawing.
     // Arrays are caller-owned. line_data has max_lines * 7 floats,
-    // circle_data has max_circles * 4 floats, ellipse_data has max_ellipses * 6 floats.
+    // circle_data has max_circles * 4 floats, ellipse_data has max_ellipses * 7 floats.
     API void canny_detect_shapes(
         const unsigned char* in, int rows, int cols, int channels,
         int ksize, float sigma, float low, float high, int auto_thr, int flags,
         float rho_step, float theta_step, int line_threshold, int line_nms, int max_lines,
         int rmin, int rmax, int rstep, int circle_threshold, int min_dist, int max_circles,
         int gradient_mode,
-        int min_major, int max_major, int min_minor, int ellipse_threshold, int max_points,
+        int min_major, int max_major, int min_minor, float ellipse_support_floor, int max_points,
+        int max_working_size,
         int max_ellipses, int thickness, unsigned char* edges_out, unsigned char* overlay_out,
         unsigned char* line_accum, int line_accum_capacity, int* line_accum_w, int* line_accum_h,
         unsigned char* circle_accum, float* line_data, int* line_count,
@@ -575,6 +673,12 @@ extern "C" {
         det.copyEdges(edges_out);
         det.copyOverlay(in, channels, overlay_out, thickness);
         det.info(info_out);
+        info_out[4] = 0.0f;
+        info_out[5] = 0.0f;
+        info_out[6] = 1.0f;
+        info_out[7] = (float)cols;
+        info_out[8] = (float)rows;
+        info_out[9] = info_out[2];
         *line_count = *circle_count = *ellipse_count = 0;
         *line_accum_w = *line_accum_h = 0;
         if (flags & 1) {
@@ -603,7 +707,7 @@ extern "C" {
             vector<uint8_t> projection;
             auto circles = detectCircles(det.edges(), det.gx(), det.gy(), cols, rows,
                                          rmin, rmax, rstep, circle_threshold, min_dist,
-                                         gradient_mode != 0, projection);
+                                         max_circles, gradient_mode != 0, projection);
             memcpy(circle_accum, projection.data(), projection.size());
             *circle_count = min((int)circles.size(), max_circles);
             vector<uint8_t> rendered(overlay_out, overlay_out + (size_t)rows * cols * 3);
@@ -627,23 +731,64 @@ extern "C" {
             memcpy(overlay_out, rendered.data(), rendered.size());
         }
         if (flags & 4) {
-            auto ellipses = detectEllipses(det.edges(), cols, rows, min_major, max_major,
-                                           min_minor, ellipse_threshold, max_points);
+            float scale = 1.0f;
+            int workCols = cols, workRows = rows;
+            int workMinMajor = min_major, workMaxMajor = max_major, workMinMinor = min_minor;
+            vector<uint8_t> workingInput;
+            const unsigned char* ellipseInput = in;
+            if (max_working_size > 0 && max(rows, cols) > max_working_size) {
+                scale = (float)max_working_size / max(rows, cols);
+                scale = max(scale, 12.0f / max(1.0f, (float)min_minor));
+                scale = min(scale, 1.0f);
+                if (scale < 0.999f) {
+                    workCols = max(1, (int)lround(cols * scale));
+                    workRows = max(1, (int)lround(rows * scale));
+                    float blurSigma = 0.5f / scale;
+                    workingInput = makeWorkingImage(in, rows, cols, channels, scale, blurSigma);
+                    ellipseInput = workingInput.data();
+                    workMinMajor = max(4, (int)lround(min_major * scale));
+                    workMaxMajor = max(workMinMajor + 1, (int)lround(max_major * scale));
+                    workMinMinor = max(2, (int)lround(min_minor * scale));
+                } else {
+                    scale = 1.0f;
+                }
+            }
+            CannyDetector ellipseDet(ellipseInput, workRows, workCols, channels, 0);
+            ellipseDet.run(ksize, sigma, low, high, auto_thr != 0);
+            float sampleRatio = 0.0f;
+            int totalEdges = 0;
+            auto ellipses = detectEllipses(ellipseDet.edges(), ellipseDet.gx(), ellipseDet.gy(),
+                                           workCols, workRows, workMinMajor, workMaxMajor, workMinMinor,
+                                           ellipse_support_floor,
+                                           max_points, max_ellipses, sampleRatio, totalEdges);
             *ellipse_count = min((int)ellipses.size(), max_ellipses);
             vector<uint8_t> rendered(overlay_out, overlay_out + (size_t)rows * cols * 3);
             for (int i = 0; i < *ellipse_count; ++i) {
-                const auto& e = ellipses[i];
-                ellipse_data[i * 6] = e.x; ellipse_data[i * 6 + 1] = e.y;
-                ellipse_data[i * 6 + 2] = e.a; ellipse_data[i * 6 + 3] = e.b;
-                ellipse_data[i * 6 + 4] = e.angle; ellipse_data[i * 6 + 5] = e.votes;
-                drawEllipse(rendered, cols, rows, e, 255, 0, 220, thickness);
-                int cross = 3 * max(1, thickness);
-                drawSegment(rendered, cols, rows, (int)lround(e.x) - cross, (int)lround(e.y),
-                            (int)lround(e.x) + cross, (int)lround(e.y), 255, 0, 220, max(2, thickness / 2));
-                drawSegment(rendered, cols, rows, (int)lround(e.x), (int)lround(e.y) - cross,
-                            (int)lround(e.x), (int)lround(e.y) + cross, 255, 0, 220, max(2, thickness / 2));
+                EllipseResult e = ellipses[i];
+                e.x = (e.x + 0.5f) / scale - 0.5f;
+                e.y = (e.y + 0.5f) / scale - 0.5f;
+                e.a /= scale;
+                e.b /= scale;
+                ellipse_data[i * 7] = e.x; ellipse_data[i * 7 + 1] = e.y;
+                ellipse_data[i * 7 + 2] = e.a; ellipse_data[i * 7 + 3] = e.b;
+                ellipse_data[i * 7 + 4] = e.angle; ellipse_data[i * 7 + 5] = e.votes;
+                ellipse_data[i * 7 + 6] = e.support;
+                if (!(flags & 8)) {
+                    drawEllipse(rendered, cols, rows, e, 255, 0, 220, thickness);
+                    int cross = 3 * max(1, thickness);
+                    drawSegment(rendered, cols, rows, (int)lround(e.x) - cross, (int)lround(e.y),
+                                (int)lround(e.x) + cross, (int)lround(e.y), 255, 0, 220, max(2, thickness / 2));
+                    drawSegment(rendered, cols, rows, (int)lround(e.x), (int)lround(e.y) - cross,
+                                (int)lround(e.x), (int)lround(e.y) + cross, 255, 0, 220, max(2, thickness / 2));
+                }
             }
             memcpy(overlay_out, rendered.data(), rendered.size());
+            info_out[4] = sampleRatio;
+            info_out[5] = (float)totalEdges;
+            info_out[6] = scale;
+            info_out[7] = (float)workCols;
+            info_out[8] = (float)workRows;
+            info_out[9] = (float)totalEdges;
         }
     }
 }  // extern "C"  (Person 2)
@@ -1092,4 +1237,3 @@ API void polygon_measure(const float* xy, int n, double* out) {
 }
 
 }  // extern "C"
-

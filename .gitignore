@@ -1,6 +1,9 @@
 
 .idea/
-
+.vscode/
+build/
+build-msys2/
+venv/
 
 cmake-build-debug/
 
