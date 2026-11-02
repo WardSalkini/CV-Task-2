@@ -206,7 +206,7 @@ def keep_settings():
 lib.canny_run.restype = None
 lib.canny_run.argtypes = [
     U8P, c_int, c_int, c_int, c_int,
-    c_int, c_float, c_float, c_float, c_int,
+    c_int, c_float, c_float, c_float,
     U8P, U8P, U8P, U8P, U8P, F32P,
 ]
 lib.edge_similarity.restype = c_float
@@ -220,7 +220,7 @@ def canny_stages(image, c):
     overlay = np.empty((h, w, 3), np.uint8)
     info = np.zeros(4, np.float32)
     lib.canny_run(u8(image), h, w, 1 if image.ndim == 2 else 3, 0, int(c["ksize"]), float(c["sigma"]),
-                  float(c["low"]), float(c["high"]), int(c["auto"]),
+                  float(c["low"]), float(c["high"]),
                   u8(smooth), u8(magnitude), u8(nms), u8(edges), u8(overlay), f32(info))
     return {"smooth": smooth, "magnitude": magnitude, "nms": nms, "edges": edges}
 
@@ -229,10 +229,9 @@ def canny_controls():
     st.subheader("Canny")
     ksize = select_slider("Gaussian kernel", [3, 5, 7, 9, 11], value=5)
     sigma = slider("Sigma", 0.5, 5.0, 1.4, 0.1)
-    auto = checkbox("Automatic thresholds", False)
-    low = slider("Low threshold", 0, 255, 20, disabled=auto)
-    high = slider("High threshold", 0, 255, 60, disabled=auto)
-    return dict(ksize=ksize, sigma=sigma, auto=auto, low=low, high=high)
+    low = slider("Low threshold", 0, 255, 20)
+    high = slider("High threshold", 0, 255, 60)
+    return dict(ksize=ksize, sigma=sigma, low=low, high=high)
 
 
 def canny_steps_tab(stages):
@@ -250,10 +249,10 @@ def canny_steps_tab(stages):
 lib.canny_detect_shapes.restype = None
 lib.canny_detect_shapes.argtypes = [
     U8P, c_int, c_int, c_int,
-    c_int, c_float, c_float, c_float, c_int, c_int,
+    c_int, c_float, c_float, c_float, c_int,
     c_float, c_float, c_int, c_int, c_int,
     c_int, c_int, c_int, c_int, c_int, c_int,
-    c_int, c_int, c_int, c_int, c_float, c_int, c_int, c_int, c_int,
+    c_int, c_int, c_int, c_int, c_float, c_int, c_int, c_int,
     U8P, U8P, U8P, c_int, I32P, I32P, U8P, F32P, I32P,
     F32P, I32P, F32P, I32P, F32P,
 ]
@@ -286,8 +285,6 @@ def hough_controls():
         st.caption("Detection floor (support): 0.15")
         min_support = slider("Minimum support (fraction of outline)", 0.05, 1.00, 0.35, 0.05)
         max_points = number_input("Maximum sampled edge points", 50, 4000, 300)
-        max_working_size = number_input("Max working size (px, 0 = off)", 0, 10000, 600)
-        st.caption("Ellipse voting cost grows roughly with N^3.")
         max_ellipses = slider("Maximum ellipses", 1, 64, 16)
     return dict(
         lines=use_lines, circles=use_circles, ellipses=use_ellipses, thickness=thickness,
@@ -295,7 +292,7 @@ def hough_controls():
         max_lines=max_lines, rmin=rmin, rmax=rmax, rstep=rstep, circle_threshold=circle_threshold,
         min_dist=min_dist, max_circles=max_circles, gradient_mode=gradient_mode, min_major=min_major,
         max_major=max_major, min_minor=min_minor, min_support=min_support,
-        max_points=max_points, max_working_size=max_working_size, max_ellipses=max_ellipses)
+        max_points=max_points, max_ellipses=max_ellipses)
 
 
 def hough_detect(image, c, h):
@@ -318,12 +315,12 @@ def hough_detect(image, c, h):
     info = np.zeros(10, np.float32)
     lib.canny_detect_shapes(
         u8(image), rows, cols, 1 if image.ndim == 2 else 3,
-        int(c["ksize"]), float(c["sigma"]), float(c["low"]), float(c["high"]), int(c["auto"]), flags,
+        int(c["ksize"]), float(c["sigma"]), float(c["low"]), float(c["high"]), flags,
         float(h["rho_step"]), float(h["theta_step"]), int(h["line_threshold"]), int(h["line_nms"]),
         int(h["max_lines"]), int(h["rmin"]), int(h["rmax"]), int(h["rstep"]), int(h["circle_threshold"]),
         int(h["min_dist"]), int(h["max_circles"]), int(h["gradient_mode"]),
         int(h["min_major"]), int(h["max_major"]), int(h["min_minor"]), 0.15,
-        int(h["max_points"]), int(h["max_working_size"]), ellipse_buffer, int(h["thickness"]),
+        int(h["max_points"]), ellipse_buffer, int(h["thickness"]),
         u8(edges), u8(overlay), u8(line_acc), line_capacity, ctypes.byref(line_w), ctypes.byref(line_h),
         u8(circle_acc), f32(lines), ctypes.byref(line_n), f32(circles), ctypes.byref(circle_n),
         f32(ellipses), ctypes.byref(ellipse_n), f32(info))
@@ -335,8 +332,7 @@ def hough_detect(image, c, h):
             "line_rho_max": float(np.ceil(np.hypot(cols, rows))),
             "line_rho_step": float(h["rho_step"]), "line_theta_step": float(h["theta_step"]),
             "sample_ratio": float(info[4]), "raw_edge_count": int(info[5]),
-            "ellipse_scale": float(info[6]), "ellipse_work_width": int(info[7]),
-            "ellipse_work_height": int(info[8]), "ellipse_work_edge_count": int(info[9])}
+        }
 
 
 def draw_ellipse_overlay(overlay, ellipses, thickness):
@@ -960,9 +956,8 @@ def engine_hough_settings(h):
 
 
 def describe_canny(c, h):
-    d = {"Gaussian kernel": c["ksize"], "Sigma": c["sigma"], "Automatic thresholds": c["auto"]}
-    if not c["auto"]:
-        d.update({"Low threshold": c["low"], "High threshold": c["high"]})
+    d = {"Gaussian kernel": c["ksize"], "Sigma": c["sigma"],
+         "Low threshold": c["low"], "High threshold": c["high"]}
     d["Overlay thickness"] = h["thickness"]
     if h["lines"]:
         d.update({"Rho step": h["rho_step"], "Theta step": h["theta_step"], "Line vote threshold": h["line_threshold"],
@@ -977,7 +972,6 @@ def describe_canny(c, h):
                   "Detection floor (support)": 0.15,
                   "Minimum support (fraction of outline)": h["min_support"],
                   "Maximum sampled edge points": h["max_points"],
-                  "Max working size (px)": h["max_working_size"],
                   "Maximum ellipses": h["max_ellipses"]})
     for name in ("lines", "circles", "ellipses"):
         d[f"Detect {name}"] = h[name]
@@ -1008,22 +1002,13 @@ def canny_part(image, image_id):
     if pin:
         st.session_state["pinned_canny"] = dict(now, image_id=image_id)
 
-    m = st.columns(8)
+    m = st.columns(6)
     m[0].metric("Edge pixels", f"{now['numbers']['Edge pixels']:,}")
     m[1].metric("Thresholds used", f"{result['thresholds'][0]:.0f} / {result['thresholds'][1]:.0f}")
     m[2].metric("Lines", now["numbers"]["Lines"])
     m[3].metric("Circles", now["numbers"]["Circles"])
     m[4].metric("Ellipses", now["numbers"]["Ellipses"])
     m[5].metric("Sample ratio", f"{result['sample_ratio']:.1%}" if hough_p["ellipses"] else "off")
-    m[6].metric(
-        "Ellipse working size",
-        f"{result['ellipse_work_width']} x {result['ellipse_work_height']} "
-        f"({result['ellipse_scale']:.3f}x)" if hough_p["ellipses"] else "off",
-    )
-    m[7].metric(
-        "Working edge pixels",
-        f"{result['ellipse_work_edge_count']:,}" if hough_p["ellipses"] else "off",
-    )
     st.caption(f"Image size: {image.shape[1]} x {image.shape[0]} px")
     tabs = st.tabs(["Superimposition", "Canny steps", "Hough accumulators", "Detected data", "Compare"])
     with tabs[0]:

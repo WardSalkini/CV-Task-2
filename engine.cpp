@@ -19,7 +19,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <numeric>
 #include <vector>
 
 using namespace std;
@@ -130,7 +129,7 @@ public:
         }
     }
 
-    void run(int ksize, float sigma, float low, float high, bool autoThr) {
+    void run(int ksize, float sigma, float low, float high) {
         size_t n = (size_t)rows_ * cols_;
         // 1. smoothing
         vector<float> k = gaussianKernel(ksize, sigma);
@@ -178,19 +177,7 @@ public:
                 if (m >= m1 && m >= m2) nms_[i] = m;
             }
 
-        // 4. thresholds (manual, or automatic from the median of the surviving ridge pixels)
-        if (autoThr) {
-            vector<float> vals;
-            vals.reserve(n / 8);
-            for (size_t i = 0; i < n; ++i) if (nms_[i] > 0.0f) vals.push_back(nms_[i]);
-            float med = 0.0f;
-            if (!vals.empty()) {
-                nth_element(vals.begin(), vals.begin() + vals.size() / 2, vals.end());
-                med = vals[vals.size() / 2];
-            }
-            low = std::max(1.0f, 0.66f * med);
-            high = std::min(255.0f, 1.33f * med);
-        }
+        // 4. thresholds
         if (low > high) std::swap(low, high);
         lowUsed_ = low; highUsed_ = high;
 
@@ -260,11 +247,11 @@ extern "C" {
     // in: rows x cols x channels (1 = gray, 3 = BGR). low/high are on the 0..255 scale of the
     // normalized gradient magnitude. out_overlay is rows x cols x 3. out_info has 4 floats.
     API void canny_run(const unsigned char* in, int rows, int cols, int channels, int color_mode,
-                       int ksize, float sigma, float low, float high, int auto_thr,
+                       int ksize, float sigma, float low, float high,
                        unsigned char* out_smooth, unsigned char* out_mag, unsigned char* out_nms,
                        unsigned char* out_edges, unsigned char* out_overlay, float* out_info) {
         CannyDetector det(in, rows, cols, channels, color_mode);
-        det.run(ksize, sigma, low, high, auto_thr != 0);
+        det.run(ksize, sigma, low, high);
         det.copySmoothed(out_smooth);
         det.copyMagnitude(out_mag);
         det.copyNms(out_nms);
@@ -590,95 +577,29 @@ static void drawEllipse(vector<uint8_t>& out, int w, int h, const EllipseResult&
     }
 }
 
-static vector<uint8_t> makeWorkingImage(const unsigned char* in, int rows, int cols,
-                                        int channels, float scale, float sigma) {
-    int workRows = max(1, (int)lround(rows * scale));
-    int workCols = max(1, (int)lround(cols * scale));
-    int radius = max(1, (int)ceil(3.0f * sigma));
-    size_t sourceSize = (size_t)rows * cols * channels;
-    vector<float> horizontal(sourceSize), blurred(sourceSize);
-    vector<float> kernel(2 * radius + 1);
-    float kernelSum = 0.0f;
-    for (int i = -radius; i <= radius; ++i) {
-        kernel[i + radius] = expf(-(float)(i * i) / (2.0f * sigma * sigma));
-        kernelSum += kernel[i + radius];
-    }
-    for (float& value : kernel) value /= kernelSum;
-    for (int y = 0; y < rows; ++y)
-        for (int x = 0; x < cols; ++x)
-            for (int ch = 0; ch < channels; ++ch) {
-                float sum = 0.0f;
-                for (int k = -radius; k <= radius; ++k) {
-                    int xx = max(0, min(cols - 1, x + k));
-                    sum += kernel[k + radius] * in[((size_t)y * cols + xx) * channels + ch];
-                }
-                horizontal[((size_t)y * cols + x) * channels + ch] = sum;
-            }
-    for (int y = 0; y < rows; ++y)
-        for (int x = 0; x < cols; ++x)
-            for (int ch = 0; ch < channels; ++ch) {
-                float sum = 0.0f;
-                for (int k = -radius; k <= radius; ++k) {
-                    int yy = max(0, min(rows - 1, y + k));
-                    sum += kernel[k + radius] * horizontal[((size_t)yy * cols + x) * channels + ch];
-                }
-                blurred[((size_t)y * cols + x) * channels + ch] = sum;
-            }
-
-    vector<uint8_t> output((size_t)workRows * workCols * channels);
-    for (int y = 0; y < workRows; ++y)
-        for (int x = 0; x < workCols; ++x) {
-            float sourceY = (y + 0.5f) / scale - 0.5f;
-            float sourceX = (x + 0.5f) / scale - 0.5f;
-            sourceY = max(0.0f, min((float)(rows - 1), sourceY));
-            sourceX = max(0.0f, min((float)(cols - 1), sourceX));
-            int y0 = (int)floor(sourceY), x0 = (int)floor(sourceX);
-            int y1 = min(rows - 1, y0 + 1), x1 = min(cols - 1, x0 + 1);
-            float fy = sourceY - y0, fx = sourceX - x0;
-            for (int ch = 0; ch < channels; ++ch) {
-                float v00 = blurred[((size_t)y0 * cols + x0) * channels + ch];
-                float v01 = blurred[((size_t)y0 * cols + x1) * channels + ch];
-                float v10 = blurred[((size_t)y1 * cols + x0) * channels + ch];
-                float v11 = blurred[((size_t)y1 * cols + x1) * channels + ch];
-                float top = v00 + fx * (v01 - v00);
-                float bottom = v10 + fx * (v11 - v10);
-                float value = top + fy * (bottom - top);
-                output[((size_t)y * workCols + x) * channels + ch] =
-                    (uint8_t)lround(max(0.0f, min(255.0f, value)));
-            }
-        }
-    return output;
-}
-
-
 extern "C" {
     // flags: bit 0 lines, bit 1 circles, bit 2 ellipses, bit 3 skip ellipse drawing.
     // Arrays are caller-owned. line_data has max_lines * 7 floats,
     // circle_data has max_circles * 4 floats, ellipse_data has max_ellipses * 7 floats.
     API void canny_detect_shapes(
         const unsigned char* in, int rows, int cols, int channels,
-        int ksize, float sigma, float low, float high, int auto_thr, int flags,
+        int ksize, float sigma, float low, float high, int flags,
         float rho_step, float theta_step, int line_threshold, int line_nms, int max_lines,
         int rmin, int rmax, int rstep, int circle_threshold, int min_dist, int max_circles,
         int gradient_mode,
         int min_major, int max_major, int min_minor, float ellipse_support_floor, int max_points,
-        int max_working_size,
         int max_ellipses, int thickness, unsigned char* edges_out, unsigned char* overlay_out,
         unsigned char* line_accum, int line_accum_capacity, int* line_accum_w, int* line_accum_h,
         unsigned char* circle_accum, float* line_data, int* line_count,
         float* circle_data, int* circle_count, float* ellipse_data, int* ellipse_count,
         float* info_out) {
         CannyDetector det(in, rows, cols, channels, 0);
-        det.run(ksize, sigma, low, high, auto_thr != 0);
+        det.run(ksize, sigma, low, high);
         det.copyEdges(edges_out);
         det.copyOverlay(in, channels, overlay_out, thickness);
         det.info(info_out);
         info_out[4] = 0.0f;
         info_out[5] = 0.0f;
-        info_out[6] = 1.0f;
-        info_out[7] = (float)cols;
-        info_out[8] = (float)rows;
-        info_out[9] = info_out[2];
         *line_count = *circle_count = *ellipse_count = 0;
         *line_accum_w = *line_accum_h = 0;
         if (flags & 1) {
@@ -731,44 +652,18 @@ extern "C" {
             memcpy(overlay_out, rendered.data(), rendered.size());
         }
         if (flags & 4) {
-            float scale = 1.0f;
-            int workCols = cols, workRows = rows;
-            int workMinMajor = min_major, workMaxMajor = max_major, workMinMinor = min_minor;
-            vector<uint8_t> workingInput;
-            const unsigned char* ellipseInput = in;
-            if (max_working_size > 0 && max(rows, cols) > max_working_size) {
-                scale = (float)max_working_size / max(rows, cols);
-                scale = max(scale, 12.0f / max(1.0f, (float)min_minor));
-                scale = min(scale, 1.0f);
-                if (scale < 0.999f) {
-                    workCols = max(1, (int)lround(cols * scale));
-                    workRows = max(1, (int)lround(rows * scale));
-                    float blurSigma = 0.5f / scale;
-                    workingInput = makeWorkingImage(in, rows, cols, channels, scale, blurSigma);
-                    ellipseInput = workingInput.data();
-                    workMinMajor = max(4, (int)lround(min_major * scale));
-                    workMaxMajor = max(workMinMajor + 1, (int)lround(max_major * scale));
-                    workMinMinor = max(2, (int)lround(min_minor * scale));
-                } else {
-                    scale = 1.0f;
-                }
-            }
-            CannyDetector ellipseDet(ellipseInput, workRows, workCols, channels, 0);
-            ellipseDet.run(ksize, sigma, low, high, auto_thr != 0);
+            CannyDetector ellipseDet(in, rows, cols, channels, 0);
+            ellipseDet.run(ksize, sigma, low, high);
             float sampleRatio = 0.0f;
             int totalEdges = 0;
             auto ellipses = detectEllipses(ellipseDet.edges(), ellipseDet.gx(), ellipseDet.gy(),
-                                           workCols, workRows, workMinMajor, workMaxMajor, workMinMinor,
+                                           cols, rows, min_major, max_major, min_minor,
                                            ellipse_support_floor,
                                            max_points, max_ellipses, sampleRatio, totalEdges);
             *ellipse_count = min((int)ellipses.size(), max_ellipses);
             vector<uint8_t> rendered(overlay_out, overlay_out + (size_t)rows * cols * 3);
             for (int i = 0; i < *ellipse_count; ++i) {
                 EllipseResult e = ellipses[i];
-                e.x = (e.x + 0.5f) / scale - 0.5f;
-                e.y = (e.y + 0.5f) / scale - 0.5f;
-                e.a /= scale;
-                e.b /= scale;
                 ellipse_data[i * 7] = e.x; ellipse_data[i * 7 + 1] = e.y;
                 ellipse_data[i * 7 + 2] = e.a; ellipse_data[i * 7 + 3] = e.b;
                 ellipse_data[i * 7 + 4] = e.angle; ellipse_data[i * 7 + 5] = e.votes;
@@ -785,10 +680,6 @@ extern "C" {
             memcpy(overlay_out, rendered.data(), rendered.size());
             info_out[4] = sampleRatio;
             info_out[5] = (float)totalEdges;
-            info_out[6] = scale;
-            info_out[7] = (float)workCols;
-            info_out[8] = (float)workRows;
-            info_out[9] = (float)totalEdges;
         }
     }
 }  // extern "C"  (Person 2)
